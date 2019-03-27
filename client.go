@@ -15,8 +15,6 @@
 package main
 
 import (
-	"time"
-
 	"github.com/prometheus/common/log"
 	"github.com/zpeters/speedtest/print"
 	"github.com/zpeters/speedtest/sthttp"
@@ -28,6 +26,7 @@ const (
 )
 
 type SpeedtestResults struct {
+	Server        sthttp.Server
 	DownloadSpeed float64
 	UploadSpeed   float64
 	Latency       float64
@@ -35,21 +34,18 @@ type SpeedtestResults struct {
 
 // Client defines the Speedtest client
 type Client struct {
+	reloadServer    bool
 	Server          sthttp.Server
-	SpeedtestClient *sthttp.Client
 	AllServers      []sthttp.Server
+	SpeedtestClient *sthttp.Client
 }
 
 // NewClient defines a new client for Speedtest
-func NewClient(configURL string, serversURL string) (*Client, error) {
-	log.Debugf("New Speedtest client %s %s", configURL, serversURL)
-	// configTimeout, _ := time.ParseDuration("15s")
-	configTimeout := time.Duration(0)
-
+func NewClient(configURL string, serverListURL string, reloadServer bool) (*Client, error) {
 	stClient := sthttp.NewClient(
 		&sthttp.SpeedtestConfig{
 			ConfigURL:       configURL,
-			ServersURL:      serversURL,
+			ServersURL:      serverListURL,
 			AlgoType:        "max",
 			NumClosest:      3,
 			NumLatencyTests: 5,
@@ -57,9 +53,7 @@ func NewClient(configURL string, serversURL string) (*Client, error) {
 			Blacklist:       []string{},
 			UserAgent:       userAgent,
 		},
-		&sthttp.HTTPConfig{
-			HTTPTimeout: configTimeout,
-		},
+		&sthttp.HTTPConfig{},
 		true,
 		"|")
 
@@ -72,32 +66,36 @@ func NewClient(configURL string, serversURL string) (*Client, error) {
 
 	print.EnvironmentReport(stClient)
 
-	log.Debugf("Retrieve all servers")
+	log.Debug("Retrieve all servers")
 	allServers, err := stClient.GetServers()
 	if err != nil {
 		return nil, err
 	}
 
-	closestServers := stClient.GetClosestServers(allServers)
-	// log.Infof("Closest Servers: %s", closestServers)
-	testServer := stClient.GetFastestServer(closestServers)
-	log.Infof("Test server: %s", testServer)
-
+	stClient.GetClosestServers(allServers)
 	return &Client{
-		Server:          testServer,
+		reloadServer:    reloadServer,
 		SpeedtestClient: stClient,
 		AllServers:      allServers,
 	}, nil
 }
 
 func (client *Client) NetworkMetrics() SpeedtestResults {
+	var zeroServer sthttp.Server
+	if client.reloadServer || client.Server == zeroServer {
+		client.Server = client.SpeedtestClient.GetFastestServer(client.AllServers)
+		log.Infoln("Test server:", client.Server)
+	}
+
+	// XXX: tester may os.Exit in case of errors; we can't catch that
 	tester := tests.NewTester(client.SpeedtestClient, tests.DefaultDLSizes, tests.DefaultULSizes, false, false)
 
 	result := SpeedtestResults{
+		Server:        client.Server,
 		DownloadSpeed: 1000 * tester.Download(client.Server),
 		UploadSpeed:   1000 * tester.Upload(client.Server),
 		Latency:       client.Server.Latency / 1000,
 	}
-	log.Infof("Speedtest results: %s", result)
+	log.Infoln("Speedtest results:", result)
 	return result
 }

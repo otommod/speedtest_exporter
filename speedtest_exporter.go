@@ -21,77 +21,66 @@ import (
 	_ "net/http/pprof"
 	"os"
 
-	"github.com/tnwhitwell/speedtest_exporter/version"
-
 	"github.com/dchest/uniuri"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/common/log"
-	prom_version "github.com/prometheus/common/version"
 )
 
 const (
+	version   = "0.2.0"
 	namespace = "speedtest"
 )
 
 var (
-	ping = prometheus.NewDesc(
-		prometheus.BuildFQName(namespace, "", "ping"),
-		"Latency (ms)",
-		nil, nil,
-	)
-	download = prometheus.NewDesc(
-		prometheus.BuildFQName(namespace, "", "download"),
-		"Download bandwidth (Mbps).",
-		nil, nil,
-	)
-	upload = prometheus.NewDesc(
-		prometheus.BuildFQName(namespace, "", "upload"),
-		"Upload bandwidth (Mbps).",
-		nil, nil,
-	)
+	defaultConfigURL     = "http://c.speedtest.net/speedtest-config.php?x=" + uniuri.New()
+	defaultServerListURL = "http://c.speedtest.net/speedtest-servers-static.php?x=" + uniuri.New()
+
+	server = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "server",
+		Help:      "Server details",
+	}, []string{"name", "latitude", "longtitude"})
+	latency = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "latency",
+		Help:      "Latency (seconds)",
+	})
+	upload = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "upload",
+		Help:      "Upload bandwidth (bit/s)",
+	})
+	download = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "download",
+		Help:      "Download bandwidth (bit/s)",
+	})
 )
 
 // Exporter collects Speedtest stats from the given server and exports them using
 // the prometheus metrics package.
-type Exporter struct {
-	Client *Client
-}
+func SpeedtestMiddleware(c *Client, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		metric := c.NetworkMetrics()
+		server.With(prometheus.Labels{
+			"name":       metric.Server.Name,
+			"latitude":   fmt.Sprintf("%f", metric.Server.Lat),
+			"longtitude": fmt.Sprintf("%f", metric.Server.Lon)}).Set(1)
 
-// NewExporter returns an initialized Exporter.
-func NewExporter(client *Client) (*Exporter, error) {
-	log.Debugln("Init exporter")
-	return &Exporter{
-		Client: client,
-	}, nil
-}
+		latency.Set(metric.Latency)
+		upload.Set(metric.UploadSpeed)
+		download.Set(metric.DownloadSpeed)
 
-// Describe describes all the metrics ever exported by the Speedtest exporter.
-// It implements prometheus.Collector.
-func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
-	ch <- ping
-	ch <- download
-	ch <- upload
-}
-
-// Collect fetches the stats from configured Speedtest location and delivers them
-// as Prometheus metrics.
-// It implements prometheus.Collector.
-func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
-	log.Infof("Speedtest exporter starting")
-	if e.Client == nil {
-		log.Errorf("Speedtest client not configured.")
-		return
-	}
-
-	metrics := e.Client.NetworkMetrics()
-	ch <- prometheus.MustNewConstMetric(ping, prometheus.GaugeValue, metrics.Latency)
-	ch <- prometheus.MustNewConstMetric(download, prometheus.GaugeValue, metrics.DownloadSpeed)
-	ch <- prometheus.MustNewConstMetric(upload, prometheus.GaugeValue, metrics.UploadSpeed)
-	log.Infof("Speedtest exporter finished")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func init() {
-	prometheus.MustRegister(prom_version.NewCollector("speedtest_exporter"))
+	prometheus.MustRegister(server)
+	prometheus.MustRegister(latency)
+	prometheus.MustRegister(upload)
+	prometheus.MustRegister(download)
 }
 
 func main() {
@@ -99,33 +88,23 @@ func main() {
 		showVersion   = flag.Bool("version", false, "Print version information.")
 		listenAddress = flag.String("web.listen-address", ":9112", "Address to listen on for web interface and telemetry.")
 		metricsPath   = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
-		configURL     = flag.String("speedtest.config-url", "http://c.speedtest.net/speedtest-config.php?x="+uniuri.New(), "Speedtest configuration URL")
-		serverURL     = flag.String("speedtest.server-url", "http://c.speedtest.net/speedtest-servers-static.php?x="+uniuri.New(), "Speedtest server URL")
+		configURL     = flag.String("speedtest.config-url", defaultConfigURL, "Speedtest configuration URL")
+		serverListURL = flag.String("speedtest.server-list-url", defaultServerListURL, "Speedtest server list URL")
+		reloadServer  = flag.Bool("speedtest.reload-server", false, "Always try and find the fastest server before each test")
 	)
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("Speedtest Prometheus exporter. v%s\n", version.Version)
+		fmt.Printf("Speedtest Prometheus exporter. v%s\n", version)
 		os.Exit(0)
 	}
 
-	log.Infoln("Starting speedtest exporter", prom_version.Info())
-	log.Infoln("Build context", prom_version.BuildContext())
-
-	log.Infof("Setup Speedtest client with interval %s")
-	client, err := NewClient(*configURL, *serverURL)
+	client, err := NewClient(*configURL, *serverListURL, *reloadServer)
 	if err != nil {
-		log.Fatalf("Can't create exporter : %s", err)
+		log.Fatalln("Can't create exporter:", err)
 	}
 
-	exporter, err := NewExporter(client)
-	if err != nil {
-		log.Fatalf("Can't create exporter : %s", err)
-	}
-	log.Infoln("Register exporter")
-	prometheus.MustRegister(exporter)
-
-	http.Handle(*metricsPath, prometheus.Handler())
+	http.Handle(*metricsPath, SpeedtestMiddleware(client, promhttp.Handler()))
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
              <head><title>Speedtest Exporter</title></head>
