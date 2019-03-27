@@ -20,15 +20,13 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
-	"time"
+
+	"github.com/tnwhitwell/speedtest_exporter/version"
 
 	"github.com/dchest/uniuri"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/log"
 	prom_version "github.com/prometheus/common/version"
-
-	"github.com/nlamirault/speedtest_exporter/speedtest"
-	"github.com/nlamirault/speedtest_exporter/version"
 )
 
 const (
@@ -56,17 +54,11 @@ var (
 // Exporter collects Speedtest stats from the given server and exports them using
 // the prometheus metrics package.
 type Exporter struct {
-	Client *speedtest.Client
+	Client *Client
 }
 
 // NewExporter returns an initialized Exporter.
-func NewExporter(config string, server string, interval time.Duration) (*Exporter, error) {
-	log.Infof("Setup Speedtest client with interval %s", interval)
-	client, err := speedtest.NewClient(config, server)
-	if err != nil {
-		return nil, fmt.Errorf("Can't create the Speedtest client: %s", err)
-	}
-
+func NewExporter(client *Client) (*Exporter, error) {
 	log.Debugln("Init exporter")
 	return &Exporter{
 		Client: client,
@@ -92,9 +84,9 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	}
 
 	metrics := e.Client.NetworkMetrics()
-	ch <- prometheus.MustNewConstMetric(ping, prometheus.GaugeValue, metrics["ping"])
-	ch <- prometheus.MustNewConstMetric(download, prometheus.GaugeValue, metrics["download"])
-	ch <- prometheus.MustNewConstMetric(upload, prometheus.GaugeValue, metrics["upload"])
+	ch <- prometheus.MustNewConstMetric(ping, prometheus.GaugeValue, metrics.Latency)
+	ch <- prometheus.MustNewConstMetric(download, prometheus.GaugeValue, metrics.DownloadSpeed)
+	ch <- prometheus.MustNewConstMetric(upload, prometheus.GaugeValue, metrics.UploadSpeed)
 	log.Infof("Speedtest exporter finished")
 }
 
@@ -109,7 +101,6 @@ func main() {
 		metricsPath   = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
 		configURL     = flag.String("speedtest.config-url", "http://c.speedtest.net/speedtest-config.php?x="+uniuri.New(), "Speedtest configuration URL")
 		serverURL     = flag.String("speedtest.server-url", "http://c.speedtest.net/speedtest-servers-static.php?x="+uniuri.New(), "Speedtest server URL")
-		//interval      = flag.Int("interval", 60*time.Second, "Interval for metrics.")
 	)
 	flag.Parse()
 
@@ -121,11 +112,15 @@ func main() {
 	log.Infoln("Starting speedtest exporter", prom_version.Info())
 	log.Infoln("Build context", prom_version.BuildContext())
 
-	interval := 60 * time.Second
-	exporter, err := NewExporter(*configURL, *serverURL, interval)
+	log.Infof("Setup Speedtest client with interval %s")
+	client, err := NewClient(*configURL, *serverURL)
 	if err != nil {
-		log.Errorf("Can't create exporter : %s", err)
-		os.Exit(1)
+		log.Fatalf("Can't create exporter : %s", err)
+	}
+
+	exporter, err := NewExporter(client)
+	if err != nil {
+		log.Fatalf("Can't create exporter : %s", err)
 	}
 	log.Infoln("Register exporter")
 	prometheus.MustRegister(exporter)

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package speedtest
+package main
 
 import (
 	"time"
@@ -27,20 +27,25 @@ const (
 	userAgent = "speedtest_exporter"
 )
 
+type SpeedtestResults struct {
+	DownloadSpeed float64
+	UploadSpeed   float64
+	Latency       float64
+}
+
 // Client defines the Speedtest client
 type Client struct {
 	Server          sthttp.Server
 	SpeedtestClient *sthttp.Client
 	AllServers      []sthttp.Server
-	ClosestServers  []sthttp.Server
 }
 
 // NewClient defines a new client for Speedtest
 func NewClient(configURL string, serversURL string) (*Client, error) {
 	log.Debugf("New Speedtest client %s %s", configURL, serversURL)
-	configTimeout, _ := time.ParseDuration("15s")
-	// latencyTimeout, _ := time.ParseDuration("15s")
-	// downloadTimeout, _ := time.ParseDuration("15s")
+	// configTimeout, _ := time.ParseDuration("15s")
+	configTimeout := time.Duration(0)
+
 	stClient := sthttp.NewClient(
 		&sthttp.SpeedtestConfig{
 			ConfigURL:       configURL,
@@ -53,9 +58,6 @@ func NewClient(configURL string, serversURL string) (*Client, error) {
 			UserAgent:       userAgent,
 		},
 		&sthttp.HTTPConfig{
-			// ConfigTimeout:   configTimeout,
-			// LatencyTimeout:  latencyTimeout,
-			// DownloadTimeout: downloadTimeout,
 			HTTPTimeout: configTimeout,
 		},
 		true,
@@ -71,8 +73,7 @@ func NewClient(configURL string, serversURL string) (*Client, error) {
 	print.EnvironmentReport(stClient)
 
 	log.Debugf("Retrieve all servers")
-	var allServers []sthttp.Server
-	allServers, err = stClient.GetServers()
+	allServers, err := stClient.GetServers()
 	if err != nil {
 		return nil, err
 	}
@@ -86,22 +87,17 @@ func NewClient(configURL string, serversURL string) (*Client, error) {
 		Server:          testServer,
 		SpeedtestClient: stClient,
 		AllServers:      allServers,
-		ClosestServers:  closestServers,
 	}, nil
 }
 
-func (client *Client) NetworkMetrics() map[string]float64 {
-	result := map[string]float64{}
+func (client *Client) NetworkMetrics() SpeedtestResults {
 	tester := tests.NewTester(client.SpeedtestClient, tests.DefaultDLSizes, tests.DefaultULSizes, false, false)
-	downloadMbps := tester.Download(client.Server)
-	log.Infof("Speedtest Download: %v Mbps", downloadMbps)
-	uploadMbps := tester.Upload(client.Server)
-	log.Infof("Speedtest Upload: %v Mbps", uploadMbps)
-	ping := client.Server.Latency
-	log.Infof("Speedtest Latency: %v ms", ping)
-	result["download"] = downloadMbps
-	result["upload"] = uploadMbps
-	result["ping"] = ping
+
+	result := SpeedtestResults{
+		DownloadSpeed: 1000 * tester.Download(client.Server),
+		UploadSpeed:   1000 * tester.Upload(client.Server),
+		Latency:       client.Server.Latency / 1000,
+	}
 	log.Infof("Speedtest results: %s", result)
 	return result
 }
